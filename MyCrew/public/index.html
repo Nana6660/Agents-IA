@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CrewAI Builder</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar" id="sidebar">
+            <h2>MyCrew Builder</h2>
+            <hr style="margin: 20px 0;">
+            
+            <div class="form-group">
+                <button class="btn btn-primary" onclick="createBlock('agent')">➕ Ajouter Agent</button>
+                <button class="btn btn-primary" onclick="createBlock('task')">➕ Ajouter Tâche</button>
+            </div>
+            
+            <hr style="margin: 20px 0;">
+            
+            <div id="properties">
+                <p>Sélectionnez un bloc pour modifier ses propriétés</p>
+            </div>
+        </div>
+        
+        <div class="canvas">
+            <div class="toolbar">
+                <button class="btn btn-primary" onclick="executeWorkflow()">🚀 Exécuter</button>
+                <button class="btn btn-secondary" onclick="clearCanvas()">🗑️ Effacer</button>
+                <button class="btn btn-secondary" onclick="saveWorkflow()">💾 Sauvegarder</button>
+                <button class="btn btn-secondary" onclick="loadWorkflow()">📁 Charger</button>
+                <button class="btn btn-secondary" onclick="toggleHelp()">❓ Aide</button>
+            </div>
+            
+            <div class="workspace" id="workspace">
+                <svg id="connections" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1;"></svg>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help Panel -->
+    <div class="help-panel" id="helpPanel">
+        <div class="help-header">
+            <h3>📚 Guide d'utilisation</h3>
+            <button onclick="toggleHelp()" class="close-btn">✕</button>
+        </div>
+        <div class="help-content" id="helpContent">
+            <div class="loading">Chargement de la documentation...</div>
+        </div>
+    </div>
+
+    <div class="progress-container" id="progressContainer">
+        <h3>Exécution en cours...</h3>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div id="progressText">Initialisation...</div>
+    </div>
+
+    <div class="console collapsed" id="console">
+        <div class="console-header" onclick="toggleConsole()">
+            <span>🖥️ Console</span>
+            <span id="consoleToggle">▲</span>
+        </div>
+        <div class="console-content" id="consoleContent"></div>
+    </div>
+
+    <script>
+        let blockCounter = 0, connections = [], selectedBlock = null, connecting = false, connectStart = null, blocks = [], consoleExpanded = false;
+        
+        const blockTemplates = {
+            agent: { name: 'Agent ${id}', tools: ['lmStudio'], prompt: 'Tu es un assistant IA utile.' },
+            task: { input: '', toolName: 'lmStudio' }
+        };
+        
+        const toolConfigs = {
+            fetch: { param: 'url', placeholder: 'https://example.com', label: 'URL:' },
+            weather: { param: 'city', placeholder: 'Paris', label: 'Ville:' },
+            writeFile: { param: 'filename', placeholder: 'output.txt', label: 'Nom du fichier:', default: 'output.txt' },
+            lmStudio: { param: 'input', placeholder: 'Votre instruction...', label: 'Prompt/Input:', type: 'textarea' },
+            companyOverview: { param: 'ticker', placeholder: 'AAPL', label: 'Ticker Symbol:' },
+            incomeStatement: { param: 'ticker', placeholder: 'AAPL', label: 'Ticker Symbol:' },
+            balanceSheet: { param: 'ticker', placeholder: 'AAPL', label: 'Ticker Symbol:' },
+            earning: { param: 'ticker', placeholder: 'AAPL', label: 'Ticker Symbol:' },
+            newsSentiment: { param: 'ticker', placeholder: 'AAPL', label: 'Ticker Symbol:' },
+            appendAnalysis: { param: 'analysisConfig', label: 'Configuration:', type: 'object', fields: {
+                ticker: { placeholder: 'AAPL', label: 'Ticker:' },
+                analysisType: { placeholder: 'Overview Analysis', label: 'Type d\'analyse:' },
+                content: { placeholder: 'Contenu de l\'analyse...', label: 'Contenu:', type: 'textarea' }
+            }},
+            getAnalysisFile: { param: 'ticker', placeholder: 'AAPL', label: 'Ticker Symbol:' }
+        };
+
+        function createBlock(type, data = null) {
+            const id = `block_${blockCounter++}`;
+            const blockData = data || { ...blockTemplates[type] };
+            if (type === 'agent' && !data) blockData.name = blockData.name.replace('${id}', blockCounter);
+            
+            const block = { id, type, data: blockData, x: 100 + (blockCounter * 50), y: 100 + (blockCounter * 50), connections: [] };
+            blocks.push(block);
+            if (!data) addBlockToWorkspace(block);
+            return block;
+        }
+
+        function addBlockToWorkspace(block) {
+            const { id, type, data, x, y } = block;
+            const icon = type === 'agent' ? '🤖' : '📋';
+            const title = type === 'agent' ? data.name : 'Tâche';
+            const preview = type === 'agent' ? data.prompt.substring(0, 50) + '...' : getTaskPreview(block);
+            
+            const blockEl = Object.assign(document.createElement('div'), {
+                className: `block ${type}-block`,
+                id,
+                innerHTML: `
+                    <div class="block-header">
+                        <span>${icon} ${title}</span>
+                        <button onclick="deleteBlock('${id}')" style="background:none;border:none;color:white;cursor:pointer;">✕</button>
+                    </div>
+                    <div class="block-content"><small>${preview}</small></div>
+                    <div class="connection-point output" onclick="startConnection('${id}')"></div>
+                    <div class="connection-point input" onclick="endConnection('${id}')"></div>
+                `
+            });
+            
+            Object.assign(blockEl.style, { left: x + 'px', top: y + 'px' });
+            blockEl.addEventListener('click', () => selectBlock(id));
+            makeDraggable(blockEl, block);
+            document.getElementById('workspace').appendChild(blockEl);
+        }
+
+        function makeDraggable(element, block) {
+            let isDragging = false, startX, startY, initialX, initialY;
+
+            element.addEventListener('mousedown', (e) => {
+                if (e.target.closest('.connection-point, button')) return;
+                
+                isDragging = true;
+                [element.style.zIndex, element.style.transition] = ['1000', 'none'];
+                
+                const rect = element.getBoundingClientRect();
+                const workspaceRect = document.getElementById('workspace').getBoundingClientRect();
+                
+                [startX, startY] = [e.clientX, e.clientY];
+                [initialX, initialY] = [rect.left - workspaceRect.left, rect.top - workspaceRect.top];
+                
+                Object.assign(document.body.style, { userSelect: 'none', cursor: 'grabbing' });
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                
+                requestAnimationFrame(() => {
+                    const [deltaX, deltaY] = [e.clientX - startX, e.clientY - startY];
+                    [block.x, block.y] = [initialX + deltaX, initialY + deltaY];
+                    element.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
+                });
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (!isDragging) return;
+                
+                isDragging = false;
+                [element.style.zIndex, element.style.transition, element.style.transform] = ['', '', ''];
+                Object.assign(element.style, { left: block.x + 'px', top: block.y + 'px' });
+                Object.assign(document.body.style, { userSelect: '', cursor: '' });
+                updateConnections();
+            });
+        }
+
+        function selectBlock(blockId) {
+            document.querySelectorAll('.block').forEach(el => el.classList.remove('selected'));
+            selectedBlock = blockId;
+            document.getElementById(blockId).classList.add('selected');
+            showProperties(blockId);
+        }
+
+        function showProperties(blockId) {
+            const block = blocks.find(b => b.id === blockId);
+            const propertiesDiv = document.getElementById('properties');
+            
+            if (block.type === 'agent') {
+                propertiesDiv.innerHTML = `
+                    <h3>Agent Properties</h3>
+                    <div class="form-group">
+                        <label>Nom:</label>
+                        <input type="text" class="form-control" value="${block.data.name}" onchange="updateProperty('${blockId}', 'name', this.value)">
+                    </div>
+                    <div class="form-group">
+                        <label>Outils:</label>
+                        <select class="form-control" onchange="updateProperty('${blockId}', 'tools', [this.value])">
+                            ${Object.keys(toolConfigs).map(tool => `<option value="${tool}" ${block.data.tools.includes(tool) ? 'selected' : ''}>${tool}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Prompt:</label>
+                        <textarea class="form-control" rows="4" onchange="updateProperty('${blockId}', 'prompt', this.value)">${block.data.prompt}</textarea>
+                    </div>
+                `;
+            } else {
+                const toolName = block.data.toolName || 'lmStudio';
+                propertiesDiv.innerHTML = `
+                    <h3>Task Properties</h3>
+                    <div class="form-group">
+                        <label>Tool:</label>
+                        <select class="form-control" onchange="updateTaskTool('${blockId}', this.value)">
+                            ${Object.keys(toolConfigs).map(tool => `<option value="${tool}" ${toolName === tool ? 'selected' : ''}>${tool}</option>`).join('')}
+                        </select>
+                    </div>
+                    ${getToolParameters(toolName, block.data)}
+                `;
+            }
+        }
+
+        function getToolParameters(toolName, data) {
+            const config = toolConfigs[toolName];
+            
+            if (config.type === 'object') {
+                // Gestion des outils avec configuration complexe (appendAnalysis)
+                const fields = config.fields;
+                let html = '';
+                Object.keys(fields).forEach(fieldName => {
+                    const field = fields[fieldName];
+                    const value = data[config.param] ? data[config.param][fieldName] || '' : '';
+                    
+                    // Traitement spécial pour le champ content
+                    if (fieldName === 'content') {
+                        html += `
+                            <div class="form-group">
+                                <label>${field.label}</label>
+                                <textarea class="form-control" rows="3" placeholder="Auto-rempli depuis la tâche précédente" readonly>${value}</textarea>
+                                <div class="auto-fill-hint">💡 Ce champ sera automatiquement rempli avec le résultat de la tâche précédente</div>
+                            </div>
+                        `;
+                    } else {
+                        const inputType = field.type === 'textarea' ? 
+                            `<textarea class="form-control" rows="3" placeholder="${field.placeholder}">${value}</textarea>` :
+                            `<input type="text" class="form-control" value="${value}" placeholder="${field.placeholder}">`;
+                        
+                        html += `
+                            <div class="form-group">
+                                <label>${field.label}</label>
+                                ${inputType.replace('>', ` onchange="updateObjectProperty('${selectedBlock}', '${config.param}', '${fieldName}', this.value)">`)}
+                            </div>
+                        `;
+                    }
+                });
+                return html;
+            } else {
+                // Gestion standard des autres outils
+                const value = data[config.param] || config.default || '';
+                const inputType = config.type === 'textarea' ? 
+                    `<textarea class="form-control" rows="4" placeholder="${config.placeholder}">${value}</textarea>` :
+                    `<input type="text" class="form-control" value="${value}" placeholder="${config.placeholder}">`;
+                
+                return `
+                    <div class="form-group">
+                        <label>${config.label}</label>
+                        ${inputType.replace('>', ` onchange="updateProperty('${selectedBlock}', '${config.param}', this.value)">`)}
+                    </div>
+                `;
+            }
+        }
+
+        function updateObjectProperty(blockId, objectParam, fieldName, value) {
+            const block = blocks.find(b => b.id === blockId);
+            if (!block.data[objectParam]) block.data[objectParam] = {};
+            block.data[objectParam][fieldName] = value;
+            updateBlockPreview(blockId);
+        }
+
+        function updateTaskTool(blockId, toolName) {
+            const block = blocks.find(b => b.id === blockId);
+            // Nettoie les anciens paramètres
+            Object.keys(toolConfigs).forEach(tool => {
+                const config = toolConfigs[tool];
+                delete block.data[config.param];
+            });
+            
+            block.data.toolName = toolName;
+            
+            // Initialise les valeurs par défaut
+            const config = toolConfigs[toolName];
+            if (config.default) {
+                block.data[config.param] = config.default;
+            } else if (config.type === 'object') {
+                block.data[config.param] = {};
+            }
+            
+            showProperties(blockId);
+            updateBlockPreview(blockId);
+        }
+
+        function updateProperty(blockId, property, value) {
+            const block = blocks.find(b => b.id === blockId);
+            block.data[property] = value;
+            
+            if (property === 'name' && block.type === 'agent') {
+                document.querySelector(`#${blockId} .block-header span`).textContent = `🤖 ${value}`;
+            }
+            updateBlockPreview(blockId);
+        }
+
+        function updateBlockPreview(blockId) {
+            const block = blocks.find(b => b.id === blockId);
+            const content = document.querySelector(`#${blockId} .block-content small`);
+            content.textContent = block.type === 'task' ? getTaskPreview(block) : block.data.prompt.substring(0, 50) + '...';
+        }
+
+        function getTaskPreview(block) {
+            const { toolName } = block.data;
+            const config = toolConfigs[toolName];
+            
+            const previews = {
+                fetch: block.data.url ? `Fetch: ${block.data.url.substring(0, 30)}...` : 'Fetch: (URL manquante)',
+                weather: block.data.city ? `Weather: ${block.data.city}` : 'Weather: (ville manquante)',
+                writeFile: `Write to: ${block.data.filename || 'output.txt'}`,
+                lmStudio: block.data.input ? block.data.input.substring(0, 50) + '...' : 'LM Studio: (prompt vide)',
+                companyOverview: block.data.ticker ? `Company Overview: ${block.data.ticker}` : 'Company Overview: (ticker manquant)',
+                incomeStatement: block.data.ticker ? `Income Statement: ${block.data.ticker}` : 'Income Statement: (ticker manquant)',
+                balanceSheet: block.data.ticker ? `Balance Sheet: ${block.data.ticker}` : 'Balance Sheet: (ticker manquant)',
+                earning: block.data.ticker ? `Earnings: ${block.data.ticker}` : 'Earnings: (ticker manquant)',
+                newsSentiment: block.data.ticker ? `News Sentiment: ${block.data.ticker}` : 'News Sentiment: (ticker manquant)',
+                appendAnalysis: block.data.analysisConfig?.ticker ? 
+                    `Append Analysis: ${block.data.analysisConfig.ticker} - ${block.data.analysisConfig.analysisType || 'N/A'}` : 
+                    'Append Analysis: (config manquante)',
+                getAnalysisFile: block.data.ticker ? `Get Analysis: ${block.data.ticker}` : 'Get Analysis: (ticker manquant)'
+            };
+            return previews[toolName] || previews.lmStudio;
+        }
+
+        function startConnection(blockId) {
+            [connecting, connectStart] = [true, blockId];
+        }
+
+        function endConnection(blockId) {
+            if (connecting && connectStart && connectStart !== blockId) {
+                connections.push({ from: connectStart, to: blockId });
+                updateConnections();
+                [connecting, connectStart] = [false, null];
+            }
+        }
+
+        function updateConnections() {
+            const svg = document.getElementById('connections');
+            svg.innerHTML = '';
+            
+            connections.forEach((conn, index) => {
+                const [fromBlock, toBlock] = [document.getElementById(conn.from), document.getElementById(conn.to)];
+                if (!fromBlock || !toBlock) return;
+                
+                const [fromRect, toRect] = [fromBlock.getBoundingClientRect(), toBlock.getBoundingClientRect()];
+                const workspaceRect = document.getElementById('workspace').getBoundingClientRect();
+                
+                const [x1, y1] = [fromRect.right - workspaceRect.left, fromRect.top + fromRect.height / 2 - workspaceRect.top];
+                const [x2, y2] = [toRect.left - workspaceRect.left, toRect.top + toRect.height / 2 - workspaceRect.top];
+                const midX = (x1 + x2) / 2;
+                
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', `M ${x1} ${y1} Q ${midX} ${y1} ${midX} ${(y1 + y2) / 2} Q ${midX} ${y2} ${x2} ${y2}`);
+                path.setAttribute('class', 'connection-line');
+                path.setAttribute('id', `connection-${index}`);
+                
+                const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                dot.setAttribute('class', 'connection-dot');
+                
+                const animateMotion = document.createElementNS('http://www.w3.org/2000/svg', 'animateMotion');
+                animateMotion.setAttribute('dur', '2s');
+                animateMotion.setAttribute('repeatCount', 'indefinite');
+                const mpath = document.createElementNS('http://www.w3.org/2000/svg', 'mpath');
+                mpath.setAttributeNS('http://www.w3.org/1999/xlink', 'href', `#connection-${index}`);
+                animateMotion.appendChild(mpath);
+                dot.appendChild(animateMotion);
+                
+                svg.append(path, dot);
+            });
+        }
+
+        function deleteBlock(blockId) {
+            blocks = blocks.filter(b => b.id !== blockId);
+            connections = connections.filter(c => c.from !== blockId && c.to !== blockId);
+            document.getElementById(blockId).remove();
+            updateConnections();
+            if (selectedBlock === blockId) {
+                selectedBlock = null;
+                document.getElementById('properties').innerHTML = '<p>Sélectionnez un bloc pour modifier ses propriétés</p>';
+            }
+        }
+
+        function clearCanvas() {
+            [blocks, connections, selectedBlock] = [[], [], null];
+            document.getElementById('workspace').innerHTML = '<svg id="connections" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1;"></svg>';
+            document.getElementById('properties').innerHTML = '<p>Sélectionnez un bloc pour modifier ses propriétés</p>';
+        }
+
+        async function executeWorkflow() {
+            if (!blocks.length) return alert('Aucun bloc à exécuter!');
+            
+            clearLogs();
+            addLog('info', 'Démarrage du workflow...');
+            
+            // Validation
+            for (const block of blocks.filter(b => b.type === 'task')) {
+                const validation = validateTaskParameters(block);
+                if (!validation.valid) {
+                    addLog('error', `Erreur: ${validation.message}`);
+                    return alert(`Erreur: ${validation.message}`);
+                }
+            }
+            
+            addLog('info', `Validation réussie - ${blocks.filter(b => b.type === 'agent').length} agents, ${blocks.filter(b => b.type === 'task').length} tâches`);
+            
+            const workflow = {
+                agents: blocks.filter(b => b.type === 'agent').map(b => b.data),
+                tasks: blocks.filter(b => b.type === 'task').map(b => formatTaskForExecution(b.data))
+            };
+            
+            document.getElementById('progressContainer').style.display = 'block';
+            document.querySelectorAll('.connection-dot').forEach(dot => dot.classList.add('active'));
+            
+            try {
+                addLog('info', 'Envoi de la requête au serveur...');
+                const response = await fetch('/api/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ workflow })
+                });
+                
+                const result = await response.json();
+                
+                setTimeout(() => {
+                    document.getElementById('progressContainer').style.display = 'none';
+                    document.querySelectorAll('.connection-dot').forEach(dot => dot.classList.remove('active'));
+                    
+                    if (result.success) {
+                        addLog('success', 'Workflow exécuté avec succès!');
+                        result.results.forEach((res, i) => {
+                            const resStr = typeof res === 'string' ? res : JSON.stringify(res);
+                            addLog('info', `Étape ${i + 1}: ${resStr.substring(0, 100)}...`);
+                        });
+                        alert('Workflow exécuté avec succès!');
+                    } else {
+                        addLog('error', `Erreur: ${result.error}`);
+                        alert('Erreur: ' + result.error);
+                    }
+                }, 2000);
+                
+            } catch (error) {
+                document.getElementById('progressContainer').style.display = 'none';
+                addLog('error', `Erreur de connexion: ${error.message}`);
+                alert('Erreur de connexion: ' + error.message);
+            }
+        }
+
+        function validateTaskParameters(block) {
+            const { toolName } = block.data;
+            const config = toolConfigs[toolName];
+            
+            // Validation pour les outils financiers avec ticker
+            if (['companyOverview', 'incomeStatement', 'balanceSheet', 'earning', 'getAnalysisFile', 'newsSentiment'].includes(toolName)) {
+                const ticker = block.data[config.param];
+                if (!ticker || !ticker.trim()) {
+                    return { valid: false, message: `${config.label.slice(0, -1)} requis pour ${toolName}` };
+                }
+            }
+            
+            // Validation pour appendAnalysis (le content sera auto-injecté)
+            if (toolName === 'appendAnalysis') {
+                const analysisConfig = block.data[config.param];
+                if (!analysisConfig || !analysisConfig.ticker || !analysisConfig.ticker.trim()) {
+                    return { valid: false, message: 'Ticker requis pour appendAnalysis' };
+                }
+                if (!analysisConfig.analysisType || !analysisConfig.analysisType.trim()) {
+                    return { valid: false, message: 'Type d\'analyse requis pour appendAnalysis' };
+                }
+                // Le content n'est plus vérifié car il sera auto-injecté
+            }
+            
+            // Validation pour les autres outils
+            if (['fetch', 'weather', 'writeFile'].includes(toolName)) {
+                const value = block.data[config.param];
+                if (!value || !value.trim()) {
+                    return { valid: false, message: `${config.label.slice(0, -1)} requis pour ${toolName}` };
+                }
+            }
+            
+            return { valid: true };
+        }
+
+        function formatTaskForExecution(taskData) {
+            const { toolName } = taskData;
+            const inputs = {
+                fetch: taskData.url,
+                weather: taskData.city,
+                writeFile: { filename: taskData.filename, content: '' },
+                lmStudio: taskData.input || '',
+                companyOverview: taskData.ticker,
+                incomeStatement: taskData.ticker,
+                balanceSheet: taskData.ticker,
+                earning: taskData.ticker,
+                newsSentiment: taskData.ticker,
+                appendAnalysis: taskData.analysisConfig || {},
+                getAnalysisFile: taskData.ticker
+            };
+            return { input: inputs[toolName] || inputs.lmStudio, toolName };
+        }
+
+        function saveWorkflow() {
+            const workflow = { blocks, connections, timestamp: new Date().toISOString() };
+            const blob = new Blob([JSON.stringify(workflow, null, 2)], { type: 'application/json' });
+            const link = Object.assign(document.createElement('a'), {
+                href: URL.createObjectURL(blob),
+                download: `workflow_${new Date().toISOString().slice(0, 10)}.json`
+            });
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
+        }
+
+        function loadWorkflow() {
+            const input = Object.assign(document.createElement('input'), { type: 'file', accept: '.json' });
+            input.onchange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const workflow = JSON.parse(e.target.result);
+                        clearCanvas();
+                        
+                        [blocks, connections] = [workflow.blocks || [], workflow.connections || []];
+                        blockCounter = Math.max(...blocks.map(b => parseInt(b.id.split('_')[1]) || 0), 0) + 1;
+                        
+                        blocks.forEach(block => addBlockToWorkspace(block));
+                        updateConnections();
+                        alert('Workflow chargé avec succès!');
+                    } catch (error) {
+                        alert('Erreur lors du chargement: ' + error.message);
+                    }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
+        }
+
+        function toggleConsole() {
+            const console = document.getElementById('console');
+            const toggle = document.getElementById('consoleToggle');
+            
+            if (consoleExpanded) {
+                console.className = 'console collapsed';
+                toggle.textContent = '▲';
+            } else {
+                console.className = 'console expanded';
+                toggle.textContent = '▼';
+            }
+            consoleExpanded = !consoleExpanded;
+        }
+
+        function addLog(type, message) {
+            const content = document.getElementById('consoleContent');
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry log-${type}`;
+            logEntry.innerHTML = `<span class="log-timestamp">[${new Date().toLocaleTimeString()}]</span>${message}`;
+            content.appendChild(logEntry);
+            content.scrollTop = content.scrollHeight;
+        }
+
+        function clearLogs() {
+            document.getElementById('consoleContent').innerHTML = `<div class="log-entry log-info"><span class="log-timestamp">[${new Date().toLocaleTimeString()}]</span>Console vidée</div>`;
+        }
+
+        let helpVisible = false;
+
+        async function toggleHelp() {
+            const panel = document.getElementById('helpPanel');
+            const content = document.getElementById('helpContent');
+            
+            if (!helpVisible) {
+                panel.classList.add('visible');
+                helpVisible = true;
+                
+                // Charger la documentation si pas encore fait
+                if (content.innerHTML.includes('Chargement')) {
+                    try {
+                        const response = await fetch('help.md');
+                        const markdown = await response.text();
+                        content.innerHTML = convertMarkdownToHTML(markdown);
+                    } catch (error) {
+                        content.innerHTML = '<p>Erreur lors du chargement de la documentation.</p>';
+                    }
+                }
+            } else {
+                panel.classList.remove('visible');
+                helpVisible = false;
+            }
+        }
+
+        function convertMarkdownToHTML(markdown) {
+            return markdown
+                .replace(/^### (.*$)/gm, '<h3>$1</h3>')
+                .replace(/^## (.*$)/gm, '<h2>$1</h2>')
+                .replace(/^# (.*$)/gm, '<h1>$1</h1>')
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                .replace(/`(.*?)`/g, '<code>$1</code>')
+                .replace(/^- (.*$)/gm, '<li>$1</li>')
+                .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+                .replace(/```([^`]+)```/g, '<pre><code>$1</code></pre>')
+                .replace(/\n\n/g, '</p><p>')
+                .replace(/^(.*)$/gm, '<p>$1</p>')
+                .replace(/<p><h/g, '<h')
+                .replace(/<\/h([1-6])><\/p>/g, '</h$1>')
+                .replace(/<p><ul>/g, '<ul>')
+                .replace(/<\/ul><\/p>/g, '</ul>')
+                .replace(/<p><pre>/g, '<pre>')
+                .replace(/<\/pre><\/p>/g, '</pre>')
+                .replace(/<p><\/p>/g, '');
+        }
+
+        // Initialize
+        window.addEventListener('load', () => {
+            addLog('info', 'Console prête');
+            createBlock('agent');
+            createBlock('task');
+        });
+    </script>
+</body>
+</html>
